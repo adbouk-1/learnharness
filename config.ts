@@ -26,6 +26,9 @@ export const PATHS = {
 	/** Chat sessions (AI SDK UIMessage transcripts, one JSON file per chat). */
 	chats: path.join(DATA_ROOT, "chats"),
 	graph: path.join(DATA_ROOT, "graph"),
+	/** Last-good copies of live provider catalogs (src/store/ollama-catalog.ts):
+	 *  data/catalogs/ollama-cloud.json. */
+	catalogs: path.join(DATA_ROOT, "catalogs"),
 	/** Debug artifacts (env-gated): data/debug/provider-events/<chatId>.jsonl
 	 * raw provider stream recordings (src/agent/provider-events.ts). */
 	debug: path.join(DATA_ROOT, "debug"),

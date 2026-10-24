@@ -76,6 +76,39 @@ function boot(): AuthBoot {
 	return g[BOOT_KEY];
 }
 
+// Key-change listeners — globalThis-anchored like the boot record (HMR
+// re-imports this module; subscriptions made by other modules must survive).
+// The seam that lets a consumer (the Ollama catalog refresh) react to a
+// save/delete without keys.ts importing it back (that would be a cycle).
+const LISTENERS_KEY = Symbol.for("lh.authKeyListeners");
+
+function keyListeners(): Set<(id: string) => void> {
+	const g = globalThis as Record<symbol, Set<(id: string) => void> | undefined>;
+	if (!g[LISTENERS_KEY]) g[LISTENERS_KEY] = new Set();
+	return g[LISTENERS_KEY];
+}
+
+/** Subscribe to key saves and deletes (called with the key id after the
+ *  change has landed in file + env). Returns the unsubscribe. A throwing
+ *  listener never breaks the save or the other listeners. */
+export function onAuthKeyChange(listener: (id: string) => void): () => void {
+	const listeners = keyListeners();
+	listeners.add(listener);
+	return () => {
+		listeners.delete(listener);
+	};
+}
+
+function notifyKeyChange(id: string): void {
+	for (const listener of [...keyListeners()]) {
+		try {
+			listener(id);
+		} catch {
+			// A listener's failure is its own — the key change already landed.
+		}
+	}
+}
+
 /** Is `id` a WRITABLE key name — curated catalog, pi-ai model-provider env
  *  var or custom-provider env var (PUT/DELETE accept all three). */
 export function isWritableAuthKey(id: string): boolean {
@@ -240,6 +273,7 @@ export function saveKey(id: string, value: string): { ok: true; status: AuthKeyS
 		process.env[id] = trimmed;
 		record.fillGap.add(id);
 	}
+	notifyKeyChange(id);
 	// validateKeyShape guarantees catalog membership, so the row exists.
 	return { ok: true, status: keyStatuses().find((s) => s.id === id)! };
 }
@@ -256,6 +290,7 @@ export function deleteKey(id: string): AuthKeyStatus {
 		delete process.env[id];
 		record.fillGap.delete(id);
 	}
+	notifyKeyChange(id);
 	return keyStatuses().find((s) => s.id === id)!;
 }
 

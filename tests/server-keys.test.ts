@@ -249,3 +249,36 @@ describe("resolveKeyStatuses (pure projection)", () => {
 		assert.ok(!row.shadowedByEnv, "same value both places: redundant, not shadowed");
 	});
 });
+
+describe("onAuthKeyChange (the key-change seam)", () => {
+	it("notifies listeners on save and delete, and unsubscribe stops it", async () => {
+		const { onAuthKeyChange } = await import("../src/server/keys.ts");
+		const seen: string[] = [];
+		const off = onAuthKeyChange((id) => seen.push(id));
+		const value = "ollama-throwaway-key-0123456789";
+		assert.ok(saveKey("OLLAMA_API_KEY", value).ok);
+		assert.deepEqual(seen, ["OLLAMA_API_KEY"]);
+		assert.ok(!saveKey("OLLAMA_API_KEY", "x").ok, "a rejected save notifies nobody");
+		assert.deepEqual(seen, ["OLLAMA_API_KEY"]);
+		deleteKey("OLLAMA_API_KEY");
+		assert.deepEqual(seen, ["OLLAMA_API_KEY", "OLLAMA_API_KEY"]);
+		off();
+		saveKey("OLLAMA_API_KEY", value);
+		deleteKey("OLLAMA_API_KEY");
+		assert.equal(seen.length, 2, "unsubscribed");
+	});
+
+	it("a throwing listener does not break the save or the other listeners", async () => {
+		const { onAuthKeyChange } = await import("../src/server/keys.ts");
+		const seen: string[] = [];
+		const offBad = onAuthKeyChange(() => {
+			throw new Error("listener boom");
+		});
+		const offGood = onAuthKeyChange((id) => seen.push(id));
+		assert.ok(saveKey("OLLAMA_API_KEY", "ollama-throwaway-key-0123456789").ok);
+		assert.deepEqual(seen, ["OLLAMA_API_KEY"]);
+		deleteKey("OLLAMA_API_KEY");
+		offBad();
+		offGood();
+	});
+});

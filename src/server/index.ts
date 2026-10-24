@@ -35,6 +35,7 @@ export { effectivePromptSegments, allSegmentPaths, readPromptOverride } from "..
 export * from "./keys.ts";
 export * from "./search.ts";
 export * from "./firecrawl.ts";
+export * from "./ollama-cloud.ts";
 export { authStore } from "../store/auth.ts";
 export * from "./settings-body.ts";
 export * from "./turn-liveness.ts";
