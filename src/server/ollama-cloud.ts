@@ -37,6 +37,9 @@ const STALE_MS = 10 * 60_000;
  *  must not cost a request timeout each time. */
 const RETRY_AFTER_FAILURE_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 15_000;
+/** One whole refresh (tags + every show) is abandoned after this — the
+ *  per-request timeouts alone would allow minutes on a hung host. */
+const REFRESH_DEADLINE_MS = 20_000;
 const SHOW_CONCURRENCY = 4;
 
 /** The configured Ollama host: OLLAMA_BASE_URL (env-only, normalized — an
@@ -49,8 +52,9 @@ export function ollamaBaseUrl(): string {
 	return normalized.ok ? normalized.value : OLLAMA_DEFAULT_BASE_URL;
 }
 
-async function getJson(fetchFn: FetchLike, url: string, init: RequestInit): Promise<unknown> {
-	const resp = await fetchFn(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+async function getJson(fetchFn: FetchLike, url: string, init: RequestInit, deadline?: AbortSignal): Promise<unknown> {
+	const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+	const resp = await fetchFn(url, { ...init, signal: deadline ? AbortSignal.any([timeout, deadline]) : timeout });
 	if (!resp.ok) throw new Error(`${url} answered ${resp.status}`);
 	return resp.json();
 }
@@ -82,9 +86,15 @@ function capabilitiesOf(raw: unknown): string[] {
 /** The live catalog: `/api/tags` lists the models, then `/api/show` per
  *  model (4 at a time) adds the context length and thinking values. A
  *  failed `/api/show` keeps that model with null details (the projection
- *  falls back to its defaults); a failed `/api/tags` rejects. */
-export async function fetchOllamaCatalog(baseUrl: string, fetchFn: FetchLike = fetch): Promise<OllamaCatalogEntry[]> {
-	const tags = (await getJson(fetchFn, `${baseUrl}/api/tags`, { method: "GET" })) as { models?: unknown };
+ *  falls back to its defaults); a failed `/api/tags` rejects. `deadline`
+ *  aborts every request still in flight and rejects the whole fetch (a
+ *  half-fetched catalog is never returned). */
+export async function fetchOllamaCatalog(
+	baseUrl: string,
+	fetchFn: FetchLike = fetch,
+	deadline?: AbortSignal,
+): Promise<OllamaCatalogEntry[]> {
+	const tags = (await getJson(fetchFn, `${baseUrl}/api/tags`, { method: "GET" }, deadline)) as { models?: unknown };
 	const listed = (Array.isArray(tags.models) ? tags.models : []).flatMap((m): { id: string; capabilities: string[] }[] => {
 		const model = m as { name?: unknown; capabilities?: unknown } | null;
 		return typeof model?.name === "string" ? [{ id: model.name, capabilities: capabilitiesOf(model.capabilities) }] : [];
@@ -100,7 +110,7 @@ export async function fetchOllamaCatalog(baseUrl: string, fetchFn: FetchLike = f
 					method: "POST",
 					headers: { "content-type": "application/json" },
 					body: JSON.stringify({ model: id }),
-				})) as Record<string, unknown>;
+				}, deadline)) as Record<string, unknown>;
 				const shown = capabilitiesOf(show.capabilities);
 				entries[i] = {
 					id,
@@ -114,6 +124,9 @@ export async function fetchOllamaCatalog(baseUrl: string, fetchFn: FetchLike = f
 		}
 	}
 	await Promise.all(Array.from({ length: Math.min(SHOW_CONCURRENCY, listed.length) }, worker));
+	// Past the deadline every remaining /api/show failed by abort, not by the
+	// model — those null-detail entries are an artifact, not a catalog.
+	deadline?.throwIfAborted();
 	return entries;
 }
 
@@ -157,13 +170,20 @@ function describeError(err: unknown): string {
 	return `${err.message}${cause}`;
 }
 
+/** Whether process start kicks a refresh: not under the test runner, so
+ *  test processes stay network-free. */
+export function bootRefreshEnabled(nodeEnv: string | undefined): boolean {
+	return nodeEnv !== "test";
+}
+
 /** Refresh the catalog: fetch, install, persist. Never throws. Does
  *  nothing without an OLLAMA_API_KEY; without `force`, also nothing while
  *  the catalog is fresh (10 minutes) or a recent attempt just failed.
  *  Single-flight: concurrent callers share one run. A failure keeps the
- *  installed catalog and the file, and sets the status error. */
+ *  installed catalog and the file, sets the status error and logs it. The
+ *  whole run is bounded by `deadlineMs` (default 20 s). */
 export async function refreshOllamaCatalog(
-	opts: { force?: boolean; fetchFn?: FetchLike; now?: () => number } = {},
+	opts: { force?: boolean; fetchFn?: FetchLike; now?: () => number; deadlineMs?: number } = {},
 ): Promise<void> {
 	if (!providerKeyPresent(OLLAMA_PROVIDER_ID)) return;
 	const s = state();
@@ -177,7 +197,7 @@ export async function refreshOllamaCatalog(
 	const baseUrl = ollamaBaseUrl();
 	s.inflight = (async () => {
 		try {
-			const entries = await fetchOllamaCatalog(baseUrl, opts.fetchFn);
+			const entries = await fetchOllamaCatalog(baseUrl, opts.fetchFn, AbortSignal.timeout(opts.deadlineMs ?? REFRESH_DEADLINE_MS));
 			if (entries.length === 0) throw new Error("the host listed no models");
 			const fetchedAt = now();
 			installOllamaCatalog(entries, baseUrl);
@@ -188,6 +208,7 @@ export async function refreshOllamaCatalog(
 		} catch (err) {
 			s.failedAt = now();
 			s.error = `Ollama catalog refresh failed: ${describeError(err)}`;
+			console.warn(s.error);
 		} finally {
 			s.inflight = null;
 		}
@@ -209,13 +230,15 @@ export function ollamaCatalogStatus(): OllamaCatalogStatus {
 	return { models: ollamaModels().length, refreshedAt: s.refreshedAt, error: s.error };
 }
 
-// Boot, once per process: install the stored catalog, and re-fetch (forced)
+// Boot, once per process: install the stored catalog, re-fetch (forced)
 // whenever the Ollama key is saved or removed — a new key is the moment the
-// catalog becomes reachable. The subscription lives inside the same guard as
-// the boot load so an HMR re-import does not double it.
+// catalog becomes reachable — and kick one stale-gated refresh now (covers a
+// key that came from the real env, where no save ever runs). All inside the
+// same guard so an HMR re-import does not double any of it.
 if (!state().booted) {
 	ensureOllamaCatalog();
 	onAuthKeyChange((id) => {
 		if (id === "OLLAMA_API_KEY") void refreshOllamaCatalog({ force: true });
 	});
+	if (bootRefreshEnabled(process.env.NODE_ENV)) void refreshOllamaCatalog();
 }

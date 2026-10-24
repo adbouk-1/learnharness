@@ -25,7 +25,14 @@ import { refreshOllamaCatalog } from "./ollama-cloud.ts";
 
 export async function refreshConnectionCatalog(): Promise<void> {
 	await refreshChatGPTModels(piModels().getModels("openai").filter((m): m is Model<"openai-responses"> => m.api === "openai-responses"));
-	// Stale-only (10 minutes): GET /api/models drives this on every picker open.
+}
+
+/** The picker's refresh (GET /api/models): the ChatGPT connection catalog,
+ *  then the Ollama Cloud catalog (stale-only, 10 minutes; bounded at 20 s).
+ *  Kept apart from refreshConnectionCatalog so a ChatGPT chat turn, which
+ *  awaits that one, never waits on an Ollama network refresh. */
+export async function refreshPickerCatalogs(): Promise<void> {
+	await refreshConnectionCatalog();
 	await refreshOllamaCatalog();
 }
 function connectionModel(provider: string, id: string): Model<Api> | undefined {

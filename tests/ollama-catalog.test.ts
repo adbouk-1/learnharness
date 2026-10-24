@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { after, beforeEach, describe, it } from "node:test";
+import { after, beforeEach, describe, it, mock } from "node:test";
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "lh-ollama-catalog-"));
 process.env.LH_DATA_DIR = path.join(TMP, "data");
@@ -25,16 +25,25 @@ const { piModels } = await import("../src/agent/models.ts");
 const { installOllamaCatalog, ollamaModels } = await import("../src/agent/ollama-cloud.ts");
 const { PATHS } = await import("../config.ts");
 const { readOllamaCatalog, writeOllamaCatalog } = await import("../src/store/ollama-catalog.ts");
-const { ensureOllamaCatalog, fetchOllamaCatalog, ollamaBaseUrl, ollamaCatalogStatus, refreshOllamaCatalog } = await import(
-	"../src/server/ollama-cloud.ts"
+const { bootRefreshEnabled, ensureOllamaCatalog, fetchOllamaCatalog, ollamaBaseUrl, ollamaCatalogStatus, refreshOllamaCatalog } =
+	await import("../src/server/ollama-cloud.ts");
+const { catalogProviders, refreshConnectionCatalog, refreshPickerCatalogs, validateModelsSettings } = await import(
+	"../src/server/model-catalog.ts"
 );
-const { catalogProviders, validateModelsSettings } = await import("../src/server/model-catalog.ts");
 
 const FILE = path.join(PATHS.catalogs, "ollama-cloud.json");
 const BASE = "https://ollama.com";
 const KEY = "ollama-throwaway-key-0123456789";
 
+// A failed refresh logs its error (console.warn). Capture it so deliberate
+// failures keep the test output pristine and the log itself is assertable.
+const warnings: string[] = [];
+mock.method(console, "warn", (message: unknown) => {
+	warnings.push(String(message));
+});
+
 after(() => {
+	mock.restoreAll();
 	installOllamaCatalog([], BASE);
 	delete process.env.OLLAMA_API_KEY;
 	delete process.env.OLLAMA_BASE_URL;
@@ -83,6 +92,7 @@ function stubOllama(opts: { failTags?: Error } = {}) {
 }
 
 function reset() {
+	warnings.length = 0;
 	installOllamaCatalog([], BASE);
 	delete process.env.OLLAMA_API_KEY;
 	delete process.env.OLLAMA_BASE_URL;
@@ -207,10 +217,31 @@ describe("Ollama catalog refresh", () => {
 		assert.equal(status.refreshedAt, 50);
 		assert.match(status.error ?? "", /^Ollama catalog refresh failed/);
 		assert.match(status.error ?? "", /fetch failed/);
+		assert.deepEqual(warnings, [status.error], "the failure is logged once, verbatim");
 		assert.equal(readOllamaCatalog()!.fetchedAt, 50);
 		// A later good refresh clears the error.
 		await refreshOllamaCatalog({ force: true, fetchFn: stubOllama().fetchFn, now: () => 70 });
 		assert.equal(ollamaCatalogStatus().error, null);
+	});
+
+	it("a hung host is abandoned at the overall deadline; installed models and file survive", async () => {
+		process.env.OLLAMA_API_KEY = KEY;
+		await refreshOllamaCatalog({ force: true, fetchFn: stubOllama().fetchFn, now: () => 10 });
+		// Answers /api/tags, then hangs every /api/show until its signal aborts.
+		const hung = async (input: string, init: RequestInit): Promise<Response> => {
+			if (input.endsWith("/api/tags")) return Response.json(TAGS);
+			return new Promise<Response>((_, reject) => {
+				init.signal?.addEventListener("abort", () => reject(init.signal?.reason ?? new Error("aborted")));
+			});
+		};
+		const started = Date.now();
+		await refreshOllamaCatalog({ force: true, fetchFn: hung, now: () => 20, deadlineMs: 50 });
+		assert.ok(Date.now() - started < 5_000, "returned at the deadline, not after per-request timeouts");
+		const status = ollamaCatalogStatus();
+		assert.match(status.error ?? "", /^Ollama catalog refresh failed/);
+		assert.equal(status.refreshedAt, 10, "no half-fetched catalog was installed");
+		assert.equal(status.models, 2);
+		assert.equal(readOllamaCatalog()!.fetchedAt, 10);
 	});
 
 	it("a failed non-forced refresh backs off instead of retrying on every call", async () => {
@@ -285,6 +316,48 @@ describe("ensureOllamaCatalog", () => {
 		await refreshOllamaCatalog({ fetchFn, now: () => 11 * 60_000 });
 		assert.ok(calls.length > 0);
 		assert.deepEqual(ollamaModels().map((m) => m.id).sort(), ["gemma4:31b", "gpt-oss:120b"]);
+	});
+});
+
+describe("when the refresh runs", () => {
+	beforeEach(reset);
+
+	/** Count Ollama /api/tags calls made through the global fetch (the default
+	 *  fetchFn), answering from the stub so nothing touches the network. */
+	async function withGlobalFetchCounted(run: () => Promise<void>): Promise<number> {
+		const original = globalThis.fetch;
+		let tagsCalls = 0;
+		const stub = stubOllama();
+		globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = String(input);
+			if (url.endsWith("/api/tags")) tagsCalls++;
+			return stub.fetchFn(url, init ?? {});
+		}) as typeof fetch;
+		try {
+			await run();
+		} finally {
+			globalThis.fetch = original;
+		}
+		return tagsCalls;
+	}
+
+	it("refreshConnectionCatalog (the ChatGPT turn path) makes no Ollama fetch", async () => {
+		process.env.OLLAMA_API_KEY = KEY;
+		assert.equal(await withGlobalFetchCounted(refreshConnectionCatalog), 0);
+	});
+
+	it("refreshPickerCatalogs (GET /api/models) runs the stale-gated Ollama refresh", async () => {
+		process.env.OLLAMA_API_KEY = KEY;
+		assert.equal(await withGlobalFetchCounted(refreshPickerCatalogs), 1);
+		assert.equal(ollamaCatalogStatus().models, 2);
+		assert.equal(await withGlobalFetchCounted(refreshPickerCatalogs), 0, "fresh now: second call is free");
+	});
+
+	it("boot refresh is off under the test runner and on otherwise", () => {
+		assert.equal(bootRefreshEnabled("test"), false);
+		assert.equal(bootRefreshEnabled("production"), true);
+		assert.equal(bootRefreshEnabled("development"), true);
+		assert.equal(bootRefreshEnabled(undefined), true);
 	});
 });
 
