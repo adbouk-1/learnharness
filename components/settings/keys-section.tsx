@@ -15,7 +15,8 @@
  *    a paste box on a key the UI cannot make live would mislead.
  *  - OpenRouter is NOT special: one provider among 33, a row only when
  *    stored, otherwise it lives in the Add dropdown like everyone else.
- *  - Providers groups API keys, subscriptions, dictation and search.
+ *  - Providers groups API keys, subscriptions, dictation and web (search
+ *    engines + page fetcher).
  *    Unknown variables stay masked/read-only at the end of Model API keys.
  *
  * API: GET /api/keys (masked statuses + the providers array), PUT
@@ -24,9 +25,10 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { AUTH_KEYS, type AuthKeyStatus } from "@/src/core";
+import { AUTH_KEYS, CUSTOM_PROVIDER_KEYS, type AuthKeyStatus, type OllamaCatalogStatusDto } from "@/src/core";
 import { SettingsGroup } from "./controls.tsx";
 import { ChatGPTConnection } from "./chatgpt-connection.tsx";
+import { OllamaConnection } from "./ollama-connection.tsx";
 import { ProviderMenuList } from "./model-menu.tsx";
 import { MenuShell } from "@/components/menu-shell";
 import { notifySettingsSaved } from "@/components/settings-signal";
@@ -42,6 +44,7 @@ export interface ProviderKeyInfo {
 interface KeysResponse {
 	keys: AuthKeyStatus[];
 	providers?: ProviderKeyInfo[];
+	ollama?: OllamaCatalogStatusDto;
 }
 
 /** The curated tools group, pinned by id (the catalog owns the copy;
@@ -49,6 +52,10 @@ interface KeysResponse {
  *  2026-09-20: the Google CSE pair retired, Tavily + Brave joined) — the
  *  section can never drift from core/auth-keys.ts again. */
 const TOOL_IDS = AUTH_KEYS.map((k) => k.id) as readonly string[];
+
+/** Custom (non-pi-ai) model providers shown in Subscriptions — Ollama
+ *  Cloud today. Their key rows never ride the provider/unknown groups. */
+const SUBSCRIPTION_ENV_VARS = CUSTOM_PROVIDER_KEYS.map((p) => p.envVar) as readonly string[];
 
 /** The classification driving the table groups. Pure — exported for
  *  tests. OpenRouter is un-pinned (wave-5 owner ruling): no synthesis,
@@ -62,6 +69,9 @@ export function classifyKeys(
 	/** The curated tools rows (synthesized when absent — always shown,
 	 *  they carry the docs links a first boot needs). */
 	toolRows: AuthKeyStatus[];
+	/** Custom-provider key rows (Ollama Cloud), synthesized when absent —
+	 *  the Subscriptions group; never in providerRows or unknownRows. */
+	subscriptionRows: AuthKeyStatus[];
 	/** Unknown file vars — preserved, read-only. */
 	unknownRows: AuthKeyStatus[];
 	/** Providers without a stored key — the Add dropdown's options. */
@@ -81,7 +91,7 @@ export function classifyKeys(
 	const providerRows: AuthKeyStatus[] = [];
 	const unknownRows: AuthKeyStatus[] = [];
 	for (const s of statuses) {
-		if (isTool(s.id)) continue;
+		if (isTool(s.id) || SUBSCRIPTION_ENV_VARS.includes(s.id)) continue;
 		if (providerEnv.has(s.id) || (!s.info && providers === undefined)) providerRows.push(s);
 		else if (!s.info) unknownRows.push(s);
 		// (pre-interlude catalogs: a curated-but-unclassified status still
@@ -91,6 +101,7 @@ export function classifyKeys(
 	return {
 		providerRows,
 		toolRows: TOOL_IDS.map((id) => byId.get(id) ?? synth(id)),
+		subscriptionRows: SUBSCRIPTION_ENV_VARS.map((id) => byId.get(id) ?? synth(id)),
 		unknownRows,
 		addable: (providers ?? []).filter((p) => !byId.has(p.envVar)),
 	};
@@ -108,7 +119,7 @@ export function keyStatusLine(status: AuthKeyStatus): string {
 /** One table row: label left, tiny docs link + status right. Writable
  *  rows click-unfold an editor beneath (owner interaction); env-owned
  *  rows are dimmed and read-only (a paste box there would mislead). */
-function KeyTableRow({
+export function KeyTableRow({
 	label,
 	docsUrl,
 	status,
@@ -316,17 +327,23 @@ function AddProviderRow({
 }
 
 export function KeysSection({
+	initial,
 	/** A deep-linked row to unfold on arrival (zero-keys wave): the
 	 *  dictation error's click lands here on DEEPGRAM_API_KEY. Followed
 	 *  while mounted too — the settings dialog's while-open retarget
 	 *  pattern. undefined = nothing seeded. */
 	initialRow,
 }: {
+	/** A first GET /api/keys payload, rendered without the loading state
+	 *  (the render-test seam — effects never run under SSR). Production
+	 *  mounts without it and fetches. */
+	initial?: KeysResponse;
 	initialRow?: string;
 }) {
-	const [statuses, setStatuses] = useState<AuthKeyStatus[] | null>(null);
-	const [providers, setProviders] = useState<ProviderKeyInfo[] | undefined>(undefined);
-	const [loading, setLoading] = useState(true);
+	const [statuses, setStatuses] = useState<AuthKeyStatus[] | null>(initial?.keys ?? null);
+	const [providers, setProviders] = useState<ProviderKeyInfo[] | undefined>(initial?.providers);
+	const [ollama, setOllama] = useState<OllamaCatalogStatusDto | undefined>(initial?.ollama);
+	const [loading, setLoading] = useState(initial === undefined);
 	/** The unfolded row (its id), null = all folded. Seeded by the
 	 *  deep-link (initialRow) and re-followed when it retargets. */
 	const [openRow, setOpenRow] = useState<string | null>(initialRow ?? null);
@@ -357,6 +374,7 @@ export function KeysSection({
 			.then((body: KeysResponse) => {
 				setStatuses(body.keys ?? []);
 				if (body.providers) setProviders(body.providers);
+				setOllama(body.ollama);
 			})
 			.catch(() => setStatuses([]))
 			.finally(() => setLoading(false));
@@ -400,7 +418,7 @@ export function KeysSection({
 		return <p className="px-6 py-5 text-xs text-muted-foreground/70">Loading keys…</p>;
 	}
 
-	const { providerRows, toolRows, unknownRows, addable } = classifyKeys(statuses, providers);
+	const { providerRows, toolRows, subscriptionRows, unknownRows, addable } = classifyKeys(statuses, providers);
 
 	async function saveNewProvider(p: ProviderKeyInfo, value: string) {
 		const err = await saveKey(p.envVar, value);
@@ -457,9 +475,25 @@ export function KeysSection({
 
 			<SettingsGroup label="Subscriptions" testid="group-subscriptions">
 				<div data-testid="group-chatgpt"><ChatGPTConnection /></div>
+				{subscriptionRows.map((status) => (
+					<OllamaConnection
+						key={status.id}
+						status={status}
+						catalog={ollama}
+						expanded={openRow === status.id}
+						onToggle={() => setOpenRow(openRow === status.id ? null : status.id)}
+						onSave={async (v) => {
+							const err = await saveKey(status.id, v);
+							if (!err) setOpenRow(null);
+							return err;
+						}}
+						onCancel={() => setOpenRow(null)}
+						onDelete={() => deleteKey(status.id)}
+					/>
+				))}
 			</SettingsGroup>
 
-			{(["Dictation", "Search"] as const).map((label) => <SettingsGroup key={label} label={label} testid={label === "Dictation" ? "group-dictation" : "group-search"}>
+			{(["Dictation", "Web"] as const).map((label) => <SettingsGroup key={label} label={label} testid={label === "Dictation" ? "group-dictation" : "group-search"}>
 				{toolRows.filter((status) => label === "Dictation" ? status.id === "DEEPGRAM_API_KEY" : status.id !== "DEEPGRAM_API_KEY").map((status) => (
 					<KeyTableRow
 						key={status.id}

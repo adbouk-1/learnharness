@@ -83,3 +83,12 @@ export interface CatalogProvider {
 	/** Whether that var is currently present (env or auth file). */
 	keyPresent: boolean;
 }
+/** What Settings → Providers shows about the Ollama Cloud catalog (Task 6,
+ *  home-stack wave): tool-capable model count, last fetch time (null:
+ *  never) and the last refresh failure (null: none). The server's
+ *  `ollamaCatalogStatus()` return value satisfies this shape. */
+export interface OllamaCatalogStatusDto {
+	models: number;
+	refreshedAt: number | null;
+	error: string | null;
+}

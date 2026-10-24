@@ -261,6 +261,23 @@ describe("classifyKeys — the Keys section's two-group projection", () => {
 		assert.ok(!out.toolRows[1]!.present);
 	});
 
+	it("subscriptionRows: a stored Ollama key lands there only (not provider/unknown rows)", () => {
+		for (const provs of [providers, undefined]) {
+			const out = classifyKeys([synth("OLLAMA_API_KEY", true)], provs);
+			assert.deepEqual(out.subscriptionRows.map((r) => r.id), ["OLLAMA_API_KEY"]);
+			assert.ok(out.subscriptionRows[0]!.present);
+			assert.ok(!out.providerRows.some((r) => r.id === "OLLAMA_API_KEY"));
+			assert.ok(!out.unknownRows.some((r) => r.id === "OLLAMA_API_KEY"));
+		}
+	});
+
+	it("subscriptionRows: synthesized absent Ollama row when no status exists", () => {
+		const out = classifyKeys([], providers);
+		assert.equal(out.subscriptionRows.length, 1);
+		assert.equal(out.subscriptionRows[0]!.id, "OLLAMA_API_KEY");
+		assert.equal(out.subscriptionRows[0]!.present, false);
+	});
+
 	it("unknown file vars surface read-only, out of the provider rows", () => {
 		const out = classifyKeys([synth("PLANS_LOGIN_TOKEN", true)], providers);
 		assert.equal(out.unknownRows.length, 1);

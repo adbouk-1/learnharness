@@ -223,6 +223,63 @@ describe("KeysSection (thin SSR)", () => {
 		const html = renderToStaticMarkup(<KeysSection />);
 		assert.ok(html.includes("Loading keys…"));
 	});
+
+	const keyStatus = (id: string, present = false, masked: string | null = null) => ({
+		id,
+		info: null,
+		present,
+		masked,
+		source: present ? ("file" as const) : ("none" as const),
+		shadowedByEnv: false,
+	});
+	const ollamaOk = { models: 21, refreshedAt: Date.now() - 3 * 60_000, error: null };
+	const renderKeys = (ollama: { models: number; refreshedAt: number | null; error: string | null } | undefined, present = true) =>
+		renderToStaticMarkup(
+			<KeysSection initial={{ keys: [keyStatus("OLLAMA_API_KEY", present, present ? "…ab12 (40 chars)" : null)], providers: [], ollama }} />,
+		);
+	/** The markup of one SettingsGroup, by its testid, up to the next group
+	 *  (the ChatGPT wrapper nests inside Subscriptions, so it is no boundary). */
+	const groupOf = (html: string, testid: string) => {
+		const i = html.indexOf(`data-testid="${testid}"`);
+		assert.ok(i >= 0, `missing ${testid}`);
+		const next = html.slice(i + 1).search(/data-testid="group-(?!chatgpt)/);
+		return html.slice(i, next < 0 ? undefined : i + 1 + next);
+	};
+
+	it("Ollama Cloud row lives in the Subscriptions group", () => {
+		const group = groupOf(renderKeys(ollamaOk), "group-subscriptions");
+		assert.ok(group.includes('data-testid="key-ollama_api_key"'));
+		assert.ok(group.includes("Ollama Cloud"));
+	});
+
+	it("Ollama Cloud status line: model count and relative refresh time", () => {
+		const html = renderKeys(ollamaOk);
+		assert.ok(html.includes("21 models"));
+		assert.ok(html.includes("refreshed 3 min ago"));
+	});
+
+	it("Ollama Cloud status line: the refresh error text", () => {
+		const html = renderKeys({ models: 0, refreshedAt: null, error: "Ollama catalog refresh failed: fetch failed" });
+		assert.ok(html.includes("Ollama catalog refresh failed: fetch failed"));
+	});
+
+	it("Ollama Cloud status line: nothing when no key is set", () => {
+		const html = renderKeys(ollamaOk, false);
+		assert.ok(html.includes('data-testid="key-ollama_api_key"'));
+		assert.ok(!html.includes("21 models"));
+		assert.ok(!html.includes('data-testid="ollama-catalog-status"'));
+	});
+
+	it("Web group (testid group-search) holds the self-hosted and keyed engines", () => {
+		const html = renderKeys(ollamaOk);
+		const group = groupOf(html, "group-search");
+		assert.ok(group.includes(">Web<"));
+		assert.ok(!html.includes(">Search<"));
+		for (const id of ["searxng_url", "firecrawl_url", "firecrawl_api_key", "tavily_api_key", "brave_api_key"]) {
+			assert.ok(group.includes(`data-testid="key-${id}"`), id);
+		}
+		assert.ok(!group.includes('data-testid="key-deepgram_api_key"'));
+	});
 });
 
 describe("AppearanceSection (thin SSR)", () => {

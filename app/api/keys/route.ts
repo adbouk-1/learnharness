@@ -15,11 +15,21 @@
  * value comes from the environment (dev .env.local / launch env) or the
  * file, and `shadowedByEnv` explains why a saved key is not the live one
  * (env always wins).
+ *
+ * `ollama` is the Ollama Cloud catalog status (model count, last refresh,
+ * last failure) the Providers page shows under the Ollama Cloud row.
  */
-import { keyStatuses, providerKeyList } from "@/src/server";
+import type { OllamaCatalogStatusDto } from "@/src/core";
+import { keyStatuses, ollamaCatalogStatus, providerKeyList, refreshOllamaCatalog } from "@/src/server";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-	return Response.json({ keys: keyStatuses(), providers: providerKeyList() });
+	// Opening the Providers page is a "providers data requested" moment:
+	// kick a stale-gated, key-gated catalog refresh but never await it —
+	// the page must not wait on the network. `ollama` reports whatever the
+	// last refresh produced (refreshOllamaCatalog never throws).
+	void refreshOllamaCatalog();
+	const ollama: OllamaCatalogStatusDto = ollamaCatalogStatus();
+	return Response.json({ keys: keyStatuses(), providers: providerKeyList(), ollama });
 }
