@@ -27,6 +27,9 @@ export interface AuthKeyInfo {
 	description: string;
 	/** Where the user gets a key (opens in the real browser via the shell). */
 	docsUrl: string;
+	/** "url" entries hold a non-secret base URL (shown in full, stored
+	 *  normalized); absent means a secret key (masked). */
+	kind?: "secret" | "url";
 }
 
 export const AUTH_KEYS: readonly AuthKeyInfo[] = [
@@ -47,6 +50,26 @@ export const AUTH_KEYS: readonly AuthKeyInfo[] = [
 		label: "Brave Search",
 		description: "Web-search engine for the researcher sub-agent — the alternative to Tavily. Setting the key activates it.",
 		docsUrl: "https://brave.com/search/api/",
+	},
+	{
+		id: "SEARXNG_URL",
+		label: "SearXNG",
+		description: "Base URL of a self-hosted SearXNG instance — the preferred web-search engine for the researcher sub-agent. Setting it activates it.",
+		docsUrl: "https://docs.searxng.org/",
+		kind: "url",
+	},
+	{
+		id: "FIRECRAWL_URL",
+		label: "Firecrawl",
+		description: "Base URL of a self-hosted Firecrawl instance — fetches pages as clean markdown for the researcher sub-agent.",
+		docsUrl: "https://docs.firecrawl.dev/contributing/self-host",
+		kind: "url",
+	},
+	{
+		id: "FIRECRAWL_API_KEY",
+		label: "Firecrawl API key",
+		description: "Bearer key for your Firecrawl instance — only needed when the instance enforces authentication.",
+		docsUrl: "https://docs.firecrawl.dev/",
 	},
 ] as const;
 
@@ -132,8 +155,49 @@ export function isProviderEnvVar(envVar: string): boolean {
 	return AUTH_PROVIDER_ENV_VARS.has(envVar);
 }
 
+/**
+ * CUSTOM MODEL PROVIDERS — providers that are NOT in pi-ai's table but take
+ * a plain key env var. Deliberately a SEPARATE table: AUTH_PROVIDER_KEYS is
+ * pinned to exactly pi-ai's providers (tests/auth-provider-keys.test.ts),
+ * so a fork-added provider can never live there. Ollama Cloud's optional
+ * OLLAMA_BASE_URL stays env-only (never writable through the API).
+ */
+export const CUSTOM_PROVIDER_KEYS: readonly AuthProviderInfo[] = [
+	{ id: "ollama-cloud", envVar: "OLLAMA_API_KEY", label: "Ollama Cloud" },
+] as const;
+
+export const CUSTOM_PROVIDER_ENV_VARS: ReadonlySet<string> = new Set(CUSTOM_PROVIDER_KEYS.map((p) => p.envVar));
+
+/** Is this env-var name the key of a CUSTOM (non-pi-ai) model provider? */
+export function isCustomProviderEnvVar(envVar: string): boolean {
+	return CUSTOM_PROVIDER_ENV_VARS.has(envVar);
+}
+
 /** Shape-check result: ok, or a 400-ready message naming the expectation. */
 export type KeyShapeResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * Normalize a service BASE URL: trim, http(s) only, one trailing slash
+ * stripped, and no path, query or hash (the adapters append their own
+ * endpoint paths — a pasted /search would silently double up).
+ */
+export function normalizeBaseUrl(raw: string): { ok: true; value: string } | { ok: false; error: string } {
+	const value = raw.trim();
+	let url: URL;
+	try {
+		url = new URL(value);
+	} catch {
+		return { ok: false, error: "must be a base URL such as https://host or http://10.0.0.5:8080" };
+	}
+	if (url.protocol !== "http:" && url.protocol !== "https:") {
+		return { ok: false, error: "base URL must start with http:// or https://" };
+	}
+	if ((url.pathname !== "/" && url.pathname !== "") || url.search !== "" || url.hash !== "" || /[?#]/.test(value)) {
+		return { ok: false, error: "must be a base URL only — no path, query or hash" };
+	}
+	// url.origin is lowercase, default-port-free and slash-free.
+	return { ok: true, value: value.replace(/\/$/, "") };
+}
 
 /**
  * The write-side shape gate (owner decision: reject bad pastes with 400 —
@@ -164,6 +228,13 @@ export function validateKeyShape(id: string, rawValue: string): KeyShapeResult {
 		case "DEEPGRAM_API_KEY":
 			// No public format — the length floor only catches truncated pastes.
 			return nonEmpty(20);
+		case "SEARXNG_URL":
+		case "FIRECRAWL_URL": {
+			const r = normalizeBaseUrl(value);
+			return r.ok ? { ok: true } : { ok: false, error: `${id} ${r.error}` };
+		}
+		case "FIRECRAWL_API_KEY":
+			return genericProviderKeyGuard(id, value);
 		default:
 			return { ok: false, error: `unknown key "${id}" (supported: ${[...AUTH_KEY_IDS].join(", ")})` };
 	}

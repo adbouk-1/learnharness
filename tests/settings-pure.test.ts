@@ -253,6 +253,9 @@ describe("classifyKeys — the Keys section's two-group projection", () => {
 			"DEEPGRAM_API_KEY",
 			"TAVILY_API_KEY",
 			"BRAVE_API_KEY",
+			"SEARXNG_URL",
+			"FIRECRAWL_URL",
+			"FIRECRAWL_API_KEY",
 		]);
 		assert.ok(out.toolRows[0]!.present);
 		assert.ok(!out.toolRows[1]!.present);

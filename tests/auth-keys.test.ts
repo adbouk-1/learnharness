@@ -9,13 +9,22 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AUTH_KEYS, genericProviderKeyGuard, isKnownAuthKey, maskKey, validateKeyShape } from "../src/core/auth-keys.ts";
+import {
+	AUTH_KEYS,
+	AUTH_PROVIDER_KEYS,
+	CUSTOM_PROVIDER_KEYS,
+	genericProviderKeyGuard,
+	isKnownAuthKey,
+	maskKey,
+	normalizeBaseUrl,
+	validateKeyShape,
+} from "../src/core/auth-keys.ts";
 
 describe("the catalog", () => {
 	it("is exactly the three CURATED app-service keys (provider keys live in the provider table)", () => {
 		assert.deepEqual(
 			AUTH_KEYS.map((k) => k.id),
-			["DEEPGRAM_API_KEY", "TAVILY_API_KEY", "BRAVE_API_KEY"],
+			["DEEPGRAM_API_KEY", "TAVILY_API_KEY", "BRAVE_API_KEY", "SEARXNG_URL", "FIRECRAWL_URL", "FIRECRAWL_API_KEY"],
 		);
 		for (const k of AUTH_KEYS) {
 			assert.ok(k.label.length > 0, `${k.id} has a label`);
@@ -28,6 +37,27 @@ describe("the catalog", () => {
 		assert.ok(!isKnownAuthKey("OPENROUTER_API_KEY"));
 		assert.ok(!isKnownAuthKey("GOOGLE_SEARCH_API_KEY"), "the CSE pair is retired");
 		assert.ok(!isKnownAuthKey("GOOGLE_CSE_ID"));
+	});
+
+	it("normalizeBaseUrl strips one trailing slash", () => {
+		assert.deepEqual(normalizeBaseUrl(" https://searxng.home.alidbouk.com/ "), { ok: true, value: "https://searxng.home.alidbouk.com" });
+	});
+	it("normalizeBaseUrl rejects a path, naming the base URL", () => {
+		const r = normalizeBaseUrl("https://searxng.home.alidbouk.com/search");
+		assert.equal(r.ok, false);
+		assert.match((r as { error: string }).error, /base URL/);
+	});
+	it("normalizeBaseUrl rejects non-http schemes", () => {
+		assert.equal(normalizeBaseUrl("ftp://x.y").ok, false);
+	});
+	it("validateKeyShape accepts SEARXNG_URL / FIRECRAWL_URL via normalizeBaseUrl and FIRECRAWL_API_KEY via the 12-char guard", () => {
+		assert.equal(validateKeyShape("SEARXNG_URL", "http://10.0.0.5:8080").ok, true);
+		assert.equal(validateKeyShape("FIRECRAWL_URL", "not a url").ok, false);
+		assert.equal(validateKeyShape("FIRECRAWL_API_KEY", "short").ok, false);
+	});
+	it("CUSTOM_PROVIDER_KEYS holds exactly ollama-cloud and is disjoint from AUTH_PROVIDER_KEYS", () => {
+		assert.deepEqual(CUSTOM_PROVIDER_KEYS.map((p) => [p.id, p.envVar]), [["ollama-cloud", "OLLAMA_API_KEY"]]);
+		assert.ok(!AUTH_PROVIDER_KEYS.some((p) => p.id === "ollama-cloud" || p.envVar === "OLLAMA_API_KEY"));
 	});
 
 	it("isKnownAuthKey: catalog yes, everything else no", () => {

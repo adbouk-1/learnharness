@@ -43,12 +43,16 @@ import {
 	AUTH_KEYS,
 	AUTH_PROVIDER_KEYS,
 	AUTH_PROVIDER_ENV_VARS,
+	CUSTOM_PROVIDER_ENV_VARS,
+	CUSTOM_PROVIDER_KEYS,
 	type AuthKeyInfo,
 	type AuthKeyStatus,
 	genericProviderKeyGuard,
+	isCustomProviderEnvVar,
 	isKnownAuthKey,
 	isProviderEnvVar,
 	maskKey,
+	normalizeBaseUrl,
 	validateKeyShape,
 } from "../core/auth-keys.ts";
 import { authStore } from "../store/auth.ts";
@@ -72,10 +76,10 @@ function boot(): AuthBoot {
 	return g[BOOT_KEY];
 }
 
-/** Is `id` a WRITABLE key name — curated catalog or model-provider env
- *  var (provider-keys interlude: PUT/DELETE accept both). */
+/** Is `id` a WRITABLE key name — curated catalog, pi-ai model-provider env
+ *  var or custom-provider env var (PUT/DELETE accept all three). */
 export function isWritableAuthKey(id: string): boolean {
-	return isKnownAuthKey(id) || isProviderEnvVar(id);
+	return isKnownAuthKey(id) || isProviderEnvVar(id) || isCustomProviderEnvVar(id);
 }
 
 /** The settings page's provider dropdown: every pi-ai provider that takes
@@ -109,6 +113,7 @@ export function initAuthEnv(): void {
 		// an env-exported OPENAI_API_KEY with a file copy gets honest shadow
 		// semantics, exactly like the curated vars.
 		...AUTH_PROVIDER_KEYS.map((p) => p.envVar),
+		...CUSTOM_PROVIDER_KEYS.map((p) => p.envVar),
 	]);
 	if (envKeysIgnored()) {
 		// THE FRESH-USER SWITCH: delete every managed env var (re-run on
@@ -165,11 +170,15 @@ export function resolveKeyStatuses(
 		// post fill-gap the file's values LIVE in env, so realEnv is what
 		// distinguishes a REAL env var from the store's own reflection).
 		const live = envValue !== undefined ? envValue : fileValue;
+		const info = AUTH_KEYS.find((k) => k.id === id) ?? null;
+		// URL-kind entries are not secret: the full value shows (still with
+		// the length suffix, so keyStatusLine keeps working).
+		const shown = (v: string) => (info?.kind === "url" ? v.trim() : maskKey(v));
 		rows.push({
 			id,
-			info: AUTH_KEYS.find((k) => k.id === id) ?? null,
+			info,
 			present: live !== undefined,
-			masked: live !== undefined ? `${maskKey(live)} (${live.trim().length} chars)` : null,
+			masked: live !== undefined ? `${shown(live)} (${live.trim().length} chars)` : null,
 			source: isRealEnv ? "env" : live !== undefined ? "file" : "none",
 			shadowedByEnv: isRealEnv && fileValue !== undefined && envValue !== fileValue,
 		});
@@ -179,7 +188,12 @@ export function resolveKeyStatuses(
 
 /** The GET view: every curated key (present or not) + unknown file vars. */
 export function keyStatuses(): AuthKeyStatus[] {
-	return resolveKeyStatuses(authStore.authVars(), process.env, boot().realEnv, AUTH_PROVIDER_ENV_VARS);
+	return resolveKeyStatuses(
+		authStore.authVars(),
+		process.env,
+		boot().realEnv,
+		new Set([...AUTH_PROVIDER_ENV_VARS, ...CUSTOM_PROVIDER_ENV_VARS]),
+	);
 }
 
 /** The live value for one var, env-first (the env-wins rule) — the canonical
@@ -202,7 +216,7 @@ export function keyValue(id: string): string | undefined {
  * no key at all: nothing to gate, present by definition. */
 export function providerKeyPresent(provider: string): boolean {
 	if (provider === "chatgpt") return chatGPTConnected();
-	const info = AUTH_PROVIDER_KEYS.find((p) => p.id === provider);
+	const info = CUSTOM_PROVIDER_KEYS.find((p) => p.id === provider) ?? AUTH_PROVIDER_KEYS.find((p) => p.id === provider);
 	return info ? keyValue(info.envVar) !== undefined : true;
 }
 
@@ -213,9 +227,13 @@ export function providerKeyPresent(provider: string): boolean {
  * reports shadowedByEnv so the page can explain it).
  */
 export function saveKey(id: string, value: string): { ok: true; status: AuthKeyStatus } | { ok: false; error: string } {
-	const shape = isProviderEnvVar(id) ? genericProviderKeyGuard(id, value) : validateKeyShape(id, value);
+	const shape =
+		isProviderEnvVar(id) || isCustomProviderEnvVar(id) ? genericProviderKeyGuard(id, value) : validateKeyShape(id, value);
 	if (!shape.ok) return { ok: false, error: shape.error };
-	const trimmed = value.trim();
+	// URL-kind entries store the NORMALIZED base URL (validateKeyShape passed).
+	const urlKind = AUTH_KEYS.find((k) => k.id === id)?.kind === "url";
+	const normalized = urlKind ? normalizeBaseUrl(value) : null;
+	const trimmed = normalized?.ok ? normalized.value : value.trim();
 	authStore.setAuthVar(id, trimmed);
 	const record = boot();
 	if (!record.realEnv.has(id)) {

@@ -29,6 +29,10 @@ for (const varName of [
 	"GOOGLE_SEARCH_API_KEY",
 	"GOOGLE_CSE_ID",
 	"OPENAI_API_KEY",
+	"SEARXNG_URL",
+	"FIRECRAWL_URL",
+	"FIRECRAWL_API_KEY",
+	"OLLAMA_API_KEY",
 	"FUTURE_PLANS_TOKEN",
 ]) {
 	delete process.env[varName];
@@ -51,10 +55,11 @@ fs.writeFileSync(
 process.env.OPENROUTER_API_KEY = "sk-or-v1-envvalue99";
 
 // Import AFTER env setup — module init runs the boot fill-gap + snapshot.
-const { deleteKey, initAuthEnv, keyStatuses, keyValue, resolveKeyStatuses, saveKey, isWritableAuthKey } = await import(
+const { deleteKey, initAuthEnv, keyStatuses, keyValue, providerKeyPresent, resolveKeyStatuses, saveKey, isWritableAuthKey } = await import(
 	"../src/server/keys.ts"
 );
 const { authStore } = await import("../src/store/auth.ts");
+const { CUSTOM_PROVIDER_ENV_VARS } = await import("../src/core/auth-keys.ts");
 
 const ENV_OWNED = "sk-or-v1-envvalue99";
 
@@ -182,6 +187,9 @@ describe("saveKey / deleteKey (immediate effect, no restart)", () => {
 			assert.ok(isWritableAuthKey("OPENAI_API_KEY"));
 			assert.ok(!isWritableAuthKey("FUTURE_PLANS_TOKEN"));
 			assert.ok(!isWritableAuthKey("ANTHROPIC_AUTH_TOKEN"), "anthropic alternates stay env-only");
+			assert.ok(isWritableAuthKey("OLLAMA_API_KEY"));
+			assert.ok(isWritableAuthKey("SEARXNG_URL"));
+			assert.ok(!isWritableAuthKey("OLLAMA_BASE_URL"), "the Ollama base URL stays env-only");
 		});
 
 		it("delete of a provider key: env + file both cleared", () => {
@@ -195,7 +203,41 @@ describe("saveKey / deleteKey (immediate effect, no restart)", () => {
 	});
 });
 
+describe("url-kind and custom-provider keys through the store", () => {
+	it("saveKey stores the normalized base URL and surfaces it unmasked", () => {
+		const r = saveKey("SEARXNG_URL", " https://searx.example/ ");
+		assert.ok(r.ok);
+		assert.equal(authStore.authVars().SEARXNG_URL, "https://searx.example");
+		assert.equal(process.env.SEARXNG_URL, "https://searx.example");
+		assert.equal(r.ok && r.status.masked, "https://searx.example (21 chars)");
+		assert.ok(!saveKey("SEARXNG_URL", "https://searx.example/search").ok);
+		deleteKey("SEARXNG_URL");
+	});
+
+	it("OLLAMA_API_KEY: generic guard on save, and providerKeyPresent(ollama-cloud) follows it", () => {
+		assert.equal(providerKeyPresent("ollama-cloud"), false);
+		assert.ok(!saveKey("OLLAMA_API_KEY", "short").ok);
+		assert.ok(saveKey("OLLAMA_API_KEY", "ollama-throwaway-key-0123").ok);
+		assert.equal(providerKeyPresent("ollama-cloud"), true);
+		assert.ok(keyStatuses().some((s) => s.id === "OLLAMA_API_KEY" && s.present));
+		deleteKey("OLLAMA_API_KEY");
+		assert.equal(providerKeyPresent("ollama-cloud"), false);
+	});
+});
+
 describe("resolveKeyStatuses (pure projection)", () => {
+	it("url-kind keys carry the full value in masked (URLs are not secret)", () => {
+		const row = resolveKeyStatuses({ SEARXNG_URL: "https://s.example" }, {}, new Set()).find((s) => s.id === "SEARXNG_URL")!;
+		assert.equal(row.masked, "https://s.example (17 chars)");
+	});
+
+	it("a present custom-provider var (OLLAMA_API_KEY) gets a status row", () => {
+		const rows = resolveKeyStatuses({ OLLAMA_API_KEY: "ollama-throwaway-key-0123" }, {}, new Set(), CUSTOM_PROVIDER_ENV_VARS);
+		const row = rows.find((s) => s.id === "OLLAMA_API_KEY")!;
+		assert.ok(row?.present);
+		assert.equal(row.info, null);
+	});
+
 	it("same value in env and file is NOT shadowed (redundant, not misleading)", () => {
 		const row = resolveKeyStatuses(
 			{ BRAVE_API_KEY: "BSA-same-value-throwaway-01234" },
