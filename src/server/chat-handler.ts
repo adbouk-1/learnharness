@@ -31,6 +31,7 @@ import { collectToolCallIds } from "./pi/call-ids.ts";
 import { providerEventNote } from "../agent/provider-events.ts";
 import { effectiveSettings, stores } from "./stores.ts";
 import { searchAvailable, searchProvider } from "./search.ts";
+import { pageFetcher } from "./firecrawl.ts";
 import { providerKeyPresent } from "./keys.ts";
 import {
 	extractionEnabled,
@@ -99,6 +100,9 @@ const jobRunner = createJobRunner({
 	// null = honestly unavailable; the dispatch-level drop (below) uses the
 	// same signal so keyless servers never see the research tool at all.
 	searchProvider,
+	// Home-stack integration (2026-10-24): the researcher's web_fetch runs
+	// through self-hosted Firecrawl when configured (null = local reader).
+	pageFetcher,
 });
 /** The app's ONE extraction pipeline instance — both front doors share it:
  *  quiz-triggered session runs (turn-service) and notes imports

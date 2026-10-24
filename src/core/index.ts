@@ -63,6 +63,7 @@ export * from "./settings.ts";
 export type { ChatDeleteMode, ChatDeletionStats } from "./graph-deletion.ts";
 export * from "./settings-resolution.ts";
 export * from "./search.ts"; // search port (search wave, 2026-09-20)
+export * from "./page-fetch.ts"; // page-fetcher port (home-stack integration, 2026-10-24)
 export * from "./session-find.ts";
 export * from "./session-navigation.ts";
 // auth-keys.ts (auth-keys wave, 2026-09-19): the curated key catalog +

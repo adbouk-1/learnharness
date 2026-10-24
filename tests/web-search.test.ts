@@ -12,6 +12,7 @@ import { createFauxCore, fauxAssistantMessage, fauxText, fauxToolCall, type Faux
 import type { JobStore } from "../src/core/ports.ts";
 import type { JobRecord } from "../src/core/contracts.ts";
 import type { SearchHit, SearchProvider } from "../src/core/search.ts";
+import type { FetchedPage, PageFetcher } from "../src/core/page-fetch.ts";
 
 function stubProvider(hits: SearchHit[] = [{ title: "t", url: "https://e.com/", snippet: "s" }]): SearchProvider {
 	return {
@@ -105,6 +106,118 @@ describe("web_search on the injected port (web.ts)", () => {
 		} finally {
 			globalThis.fetch = realFetch;
 		}
+	});
+});
+
+describe("web_fetch through the injected PageFetcher (Firecrawl)", () => {
+	const ARTICLE_HTML = `<html><head><title>Local</title></head><body><article><h1>Local</h1>${
+		"<p>This is a paragraph of readable article text for the local reader to extract.</p>".repeat(8)
+	}</article></body></html>`;
+
+	function fetcherOf(fn: (url: string) => Promise<FetchedPage>): { fetcher: PageFetcher; calls: string[] } {
+		const calls: string[] = [];
+		return {
+			calls,
+			fetcher: {
+				id: "firecrawl",
+				async fetch(url) {
+					calls.push(url);
+					return fn(url);
+				},
+			},
+		};
+	}
+
+	const page = (over: Partial<FetchedPage> = {}): FetchedPage => ({
+		title: "T",
+		markdown: "x".repeat(500),
+		finalUrl: "https://x/final",
+		status: 200,
+		contentType: "text/html",
+		...over,
+	});
+
+	/** Stub globalThis.fetch for one test; records every requested URL. */
+	async function withGlobalFetch<R>(
+		respond: (url: string) => Response,
+		run: (requested: string[]) => Promise<R>,
+	): Promise<R> {
+		const realFetch = globalThis.fetch;
+		const requested: string[] = [];
+		globalThis.fetch = (async (input: RequestInfo | URL) => {
+			const url = String(input);
+			requested.push(url);
+			return respond(url);
+		}) as typeof fetch;
+		try {
+			return await run(requested);
+		} finally {
+			globalThis.fetch = realFetch;
+		}
+	}
+
+	const html = (body: string) => new Response(body, { headers: { "content-type": "text/html" } });
+
+	it("Firecrawl success formats the page and never touches the network", async () => {
+		const { fetcher, calls } = fetcherOf(async () => page());
+		const { web_fetch } = createWebTools(() => null, () => fetcher);
+		await withGlobalFetch(() => html(""), async (requested) => {
+			const out = String((await web_fetch!.execute!("c", { url: "https://x/a" })).details);
+			assert.ok(out.startsWith("# T"), out);
+			assert.ok(out.includes("Source: https://x/final (HTTP 200) via Firecrawl"), out);
+			assert.deepEqual(calls, ["https://x/a"]);
+			assert.deepEqual(requested, []);
+		});
+	});
+
+	it("a .pdf path points to web_fetch_pdf without calling the fetcher", async () => {
+		const { fetcher, calls } = fetcherOf(async () => page());
+		const { web_fetch } = createWebTools(() => null, () => fetcher);
+		const out = String((await web_fetch!.execute!("c", { url: "https://x/paper.pdf" })).details);
+		assert.ok(out.includes("call web_fetch_pdf"), out);
+		assert.deepEqual(calls, []);
+	});
+
+	it("a PDF content type from Firecrawl points to web_fetch_pdf", async () => {
+		const { fetcher } = fetcherOf(async () => page({ contentType: "application/pdf" }));
+		const { web_fetch } = createWebTools(() => null, () => fetcher);
+		const out = String((await web_fetch!.execute!("c", { url: "https://x/download" })).details);
+		assert.ok(out.includes("call web_fetch_pdf"), out);
+	});
+
+	it("Firecrawl failure falls back to the local reader, never Jina", async () => {
+		const { fetcher } = fetcherOf(async () => {
+			throw new Error("Firecrawl request failed: fetch failed");
+		});
+		const { web_fetch } = createWebTools(() => null, () => fetcher);
+		await withGlobalFetch(() => html(ARTICLE_HTML), async (requested) => {
+			const out = String((await web_fetch!.execute!("c", { url: "https://x/a" })).details);
+			assert.ok(out.includes("via local reader"), out);
+			assert.ok(out.includes("Firecrawl request failed: fetch failed"), out);
+			assert.ok(requested.length > 0);
+			assert.ok(requested.every((u) => !u.startsWith("https://r.jina.ai/")), requested.join(","));
+		});
+	});
+
+	it("thin Firecrawl markdown counts as failure and falls back", async () => {
+		const { fetcher } = fetcherOf(async () => page({ markdown: "y".repeat(50) }));
+		const { web_fetch } = createWebTools(() => null, () => fetcher);
+		await withGlobalFetch(() => html(ARTICLE_HTML), async () => {
+			const out = String((await web_fetch!.execute!("c", { url: "https://x/a" })).details);
+			assert.ok(out.includes("via local reader"), out);
+		});
+	});
+
+	it("Firecrawl and the local reader both failing is a web_fetch failure, with no Jina call", async () => {
+		const { fetcher } = fetcherOf(async () => {
+			throw new Error("Firecrawl request failed: fetch failed");
+		});
+		const { web_fetch } = createWebTools(() => null, () => fetcher);
+		await withGlobalFetch(() => html("<html><body></body></html>"), async (requested) => {
+			const out = String((await web_fetch!.execute!("c", { url: "https://x/a" })).details);
+			assert.ok(out.startsWith("web_fetch failed for https://x/a"), out);
+			assert.ok(requested.every((u) => !u.startsWith("https://r.jina.ai/")), requested.join(","));
+		});
 	});
 });
 

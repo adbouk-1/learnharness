@@ -4,6 +4,7 @@ import { serverExecute } from "../tool-execute.ts";
 // The search-hit shape lives in the core port since the search wave
 // (2026-09-20); this alias keeps callers churn-free.
 import type { SearchHit as WebSearchResult, SearchProvider } from "../../core/search.ts";
+import type { PageFetcher } from "../../core/page-fetch.ts";
 export type { WebSearchResult };
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
@@ -16,7 +17,10 @@ import TurndownService from "turndown";
  *   web_search(query, count?) → {title, url, snippet}[]   (injected search port)
  *   web_fetch(url)            → readable markdown text     (Readability + Turndown,
  *                                                          Jina Reader fallback for
- *                                                          JS-rendered pages)
+ *                                                          JS-rendered pages; or the
+ *                                                          injected page-fetcher port —
+ *                                                          Firecrawl — with the local
+ *                                                          reader as its fallback)
  *
  * SEARCH REWIRING (search port wave, 2026-09-20): the Google CSE backend is
  * retired — web_search now runs on the injected search port (core/search.ts).
@@ -80,14 +84,23 @@ function htmlToMarkdown(html: string): { title: string; content: string } | null
 	return { title: article.title ?? "", content: markdown };
 }
 
-async function fetchAndExtract(url: string): Promise<string> {
+interface FetchOpts {
+	timeoutMs: number;
+	/** Jina Reader is a third-party service: off whenever the owner runs
+	 *  their own page fetcher (nothing leaves the home stack). */
+	allowJina: boolean;
+}
+
+const PDF_POINTER = "web_fetch: this URL is a PDF document — call web_fetch_pdf on it to download and read it.";
+
+async function fetchAndExtract(url: string, opts: FetchOpts): Promise<string> {
 	const resp = await fetch(url, {
 		headers: {
 			"User-Agent": USER_AGENT,
 			Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 			"Accept-Language": "en-US,en;q=0.9",
 		},
-		signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+		signal: AbortSignal.timeout(opts.timeoutMs),
 	});
 	if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
 
@@ -100,7 +113,7 @@ async function fetchAndExtract(url: string): Promise<string> {
 	if (contentType.includes("application/pdf")) {
 		// Pointer, not dead-end (researcher PDF wave, 2026-10-07): the
 		// researcher's web_fetch_pdf tool downloads + triages PDFs.
-		return `web_fetch: this URL is a PDF document — call web_fetch_pdf on it to download and read it.`;
+		return PDF_POINTER;
 	}
 	if (/image\/|audio\/|video\/|zip|octet-stream/.test(contentType)) {
 		throw new Error(`Unsupported content type: ${contentType.split(";")[0]}`);
@@ -117,9 +130,35 @@ async function fetchAndExtract(url: string): Promise<string> {
 		return header + truncate(extracted.content);
 	}
 	// Readability failed — likely JS-rendered. Try Jina Reader.
-	const jina = await fetchViaJina(url);
+	const jina = opts.allowJina ? await fetchViaJina(url) : null;
 	if (jina) return truncate(jina);
 	throw new Error("Could not extract readable content (the page may be JavaScript-rendered)");
+}
+
+/** Firecrawl-first fetch (home-stack integration, 2026-10-24): the injected
+ *  fetcher renders the page; any failure or thin result falls back to the
+ *  local reader (shorter timeout, no Jina) and says why. */
+async function fetchWithFetcher(url: string, fetcher: PageFetcher): Promise<string> {
+	// A PDF by path never goes through the scraper — the PDF tools own it.
+	if (/\.pdf$/i.test(new URL(url).pathname)) return PDF_POINTER;
+
+	let reason: string;
+	try {
+		const page = await fetcher.fetch(url);
+		if (page.contentType?.includes("application/pdf")) return PDF_POINTER;
+		const markdown = page.markdown.trim();
+		if (markdown.length >= MIN_USEFUL_CONTENT) {
+			const sourceLine = `Source: ${page.finalUrl} (HTTP ${page.status}) via Firecrawl`;
+			const header = page.title ? `# ${page.title}\n\n${sourceLine}\n\n---\n\n` : `${sourceLine}\n\n---\n\n`;
+			return header + truncate(markdown);
+		}
+		reason = "Firecrawl returned too little content";
+	} catch (err) {
+		reason = err instanceof Error ? err.message : String(err);
+	}
+	const local = await fetchAndExtract(url, { timeoutMs: 12_000, allowJina: false });
+	const labeled = local.replace(/^(Source: .*\(HTTP \d+\))$/m, "$1 via local reader");
+	return `${labeled}\n\n(Firecrawl unavailable: ${reason})`;
 }
 
 // ── tool registry ────────────────────────────────────────────────────────────
@@ -135,7 +174,10 @@ const webFetchInput = Type.Object({
 	url: Type.String({ description: "The URL to fetch" }),
 });
 
-export function createWebTools(search: () => SearchProvider | null): Record<string, AgentTool<any>> {
+export function createWebTools(
+	search: () => SearchProvider | null,
+	fetcher: () => PageFetcher | null = () => null,
+): Record<string, AgentTool<any>> {
 	return {
 		web_search: {
 			name: "web_search",
@@ -179,7 +221,10 @@ export function createWebTools(search: () => SearchProvider | null): Record<stri
 					return `web_fetch failed: invalid URL "${url}"`;
 				}
 				try {
-					return await fetchAndExtract(url);
+					const live = fetcher();
+					return live
+						? await fetchWithFetcher(url, live)
+						: await fetchAndExtract(url, { timeoutMs: FETCH_TIMEOUT_MS, allowJina: true });
 				} catch (err) {
 					return `web_fetch failed for ${url}: ${err instanceof Error ? err.message : String(err)}`;
 				}
