@@ -26,7 +26,7 @@
  * Search engine (search wave, 2026-09-20, owner: no default — an engine
  * is live iff its key is present; with a key the engine AUTO-activates,
  * the explicit choice is only a preference between live engines): a row
- * in the Tools group, Tavily / Brave via the same shared-menu look, with
+ * in the Tools group, SearXNG / Tavily / Brave via the same shared-menu look, with
  * the live reason line from /api/search. No engine key at all → the row
  * grays whole-row (a choice without a key would only BLOCK the other
  * engine's auto-activation).
@@ -83,7 +83,15 @@ const SLOT_META: Record<ModelSlotName, { label: string; roster: string }> = {
 };
 
 /** The search engines this wave ships (src/core/search.ts) + their labels. */
-const SEARCH_ENGINES = ["tavily", "brave"] as const;
+const SEARCH_ENGINES = ["searxng", "tavily", "brave"] as const;
+
+/** Each engine's menu label + the auth-store key that makes it live
+ *  (SearXNG's "key" is its URL). */
+const SEARCH_ENGINE_META: Record<(typeof SEARCH_ENGINES)[number], { label: string; envVar: string }> = {
+	searxng: { label: "SearXNG", envVar: "SEARXNG_URL" },
+	tavily: { label: "Tavily", envVar: "TAVILY_API_KEY" },
+	brave: { label: "Brave", envVar: "BRAVE_API_KEY" },
+};
 
 /** The owner's final toggleable-tool list (confirm with the user before
  *  changing — the Teacher stream settled this 2026-09-19). */
@@ -381,7 +389,7 @@ export function AgentSection({
 			.then((body: { keys: { id: string; present: boolean }[] }) => {
 				const present: Partial<Record<(typeof SEARCH_ENGINES)[number], boolean>> = {};
 				for (const id of SEARCH_ENGINES) {
-					const envVar = id === "tavily" ? "TAVILY_API_KEY" : "BRAVE_API_KEY";
+					const envVar = SEARCH_ENGINE_META[id].envVar;
 					present[id] = body.keys.some((k) => k.id === envVar && k.present);
 				}
 				setEngineKeys(present);
@@ -803,7 +811,7 @@ export function AgentSection({
 				))}
 				{(() => {
 					const engine = agent?.search?.engine ?? null;
-					const anyKey = engineKeys.tavily === true || engineKeys.brave === true;
+					const anyKey = SEARCH_ENGINES.some((id) => engineKeys[id] === true);
 					const open = openMenu?.target === "search";
 					return (
 						<SettingsRow
@@ -814,7 +822,7 @@ export function AgentSection({
 						>
 							<span ref={open ? menuAnchorRef : undefined} className="relative flex items-center gap-2">
 								<MenuTrigger
-									value={engine === "tavily" ? "Tavily" : engine === "brave" ? "Brave" : ""}
+									value={engine ? SEARCH_ENGINE_META[engine].label : ""}
 									emptyLabel="Automatic"
 									ariaLabel="Search engine"
 									testid="search-engine-trigger"
@@ -835,7 +843,7 @@ export function AgentSection({
 											setOpenMenu(null);
 										})}
 										{SEARCH_ENGINES.map((id) =>
-											engineOption(id, id === "tavily" ? "Tavily" : "Brave", engine === id, engineKeys[id] ?? false, () => {
+											engineOption(id, SEARCH_ENGINE_META[id].label, engine === id, engineKeys[id] ?? false, () => {
 												onSectionChange(composeSearchEngine(agent, id));
 												setOpenMenu(null);
 											}),

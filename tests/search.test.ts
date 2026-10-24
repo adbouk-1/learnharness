@@ -11,7 +11,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { resolveSearchEngineFor, tavilyProvider, braveProvider } from "../src/server/search.ts";
+import { resolveSearchEngineFor, tavilyProvider, braveProvider, searxngProvider } from "../src/server/search.ts";
 
 describe("resolveSearchEngineFor (the auto-detect decision)", () => {
 	it("no keys: honestly unavailable, no default", () => {
@@ -57,6 +57,26 @@ describe("resolveSearchEngineFor (the auto-detect decision)", () => {
 		assert.equal(out.engine, null);
 		assert.match(out.reason, /tavily/);
 		assert.match(out.reason, /API key is missing/);
+	});
+
+	it("SearXNG alone auto-activates", () => {
+		const out = resolveSearchEngineFor(undefined, { searxng: "https://s.example" });
+		assert.equal(out.engine, "searxng");
+	});
+
+	it("with all three configured and no pin, SearXNG wins", () => {
+		const out = resolveSearchEngineFor(undefined, {
+			searxng: "https://s.example",
+			tavily: "tvly-throwaway-key-00001",
+			brave: "brave-throwaway-key-00001",
+		});
+		assert.equal(out.engine, "searxng");
+	});
+
+	it("pinned searxng without a URL is honestly unavailable and names SEARXNG_URL", () => {
+		const out = resolveSearchEngineFor("searxng", { tavily: "tvly-throwaway-key-00001" });
+		assert.equal(out.available, false);
+		assert.match(out.reason, /SEARXNG_URL/);
 	});
 });
 
@@ -129,5 +149,70 @@ describe("braveProvider (wire shape per Brave's dashboard docs, verified 2026-09
 			new Response("rate limited", { status: 429 }),
 		);
 		await assert.rejects(provider.search("q", 5), /Brave search API 429/);
+	});
+});
+
+describe("searxngProvider (GET <base>/search?q=…&format=json)", () => {
+	it("GETs /search with q + format=json and maps results to hits", async () => {
+		let seen = "";
+		let accept: string | undefined;
+		const provider = searxngProvider("https://s.example", async (url, init) => {
+			seen = url;
+			accept = (init.headers as Record<string, string>).accept;
+			return new Response(
+				JSON.stringify({ results: [{ title: "T", url: "https://x/", content: "line1\nline2" }] }),
+				{ status: 200 },
+			);
+		});
+		const hits = await provider.search("a b", 5);
+		assert.ok(seen.startsWith("https://s.example/search?"), seen);
+		assert.equal(new URL(seen).searchParams.get("q"), "a b");
+		assert.ok(seen.includes("q=a+b"), seen);
+		assert.equal(new URL(seen).searchParams.get("format"), "json");
+		assert.equal(accept, "application/json");
+		assert.deepEqual(hits, [{ title: "T", url: "https://x/", snippet: "line1 line2" }]);
+	});
+
+	it("slices to count (SearXNG has no count parameter)", async () => {
+		const results = Array.from({ length: 8 }, (_, i) => ({ title: `T${i}`, url: `https://x/${i}`, content: "c" }));
+		const provider = searxngProvider("https://s.example", stubFetch({ results }, () => {}));
+		const hits = await provider.search("q", 3);
+		assert.equal(hits.length, 3);
+		assert.equal(hits[2]?.url, "https://x/2");
+	});
+
+	it("drops results without a url", async () => {
+		const provider = searxngProvider("https://s.example", stubFetch(
+			{ results: [{ title: "no url", content: "dropped" }, { title: "ok", url: "https://x/ok", content: "" }] },
+			() => {},
+		));
+		const hits = await provider.search("q", 5);
+		assert.deepEqual(hits, [{ title: "ok", url: "https://x/ok", snippet: "" }]);
+	});
+
+	it("HTTP 403 tells the operator to enable the json format", async () => {
+		const provider = searxngProvider("https://s.example", async () => new Response("Forbidden", { status: 403 }));
+		await assert.rejects(provider.search("q", 5), (err: unknown) => {
+			assert.ok(err instanceof Error);
+			assert.match(err.message, /search\.formats/);
+			return true;
+		});
+	});
+
+	it("other non-2xx surfaces the status and a body slice", async () => {
+		const provider = searxngProvider("https://s.example", async () => new Response("upstream broke", { status: 502 }));
+		await assert.rejects(provider.search("q", 5), /SearXNG search 502: upstream broke/);
+	});
+
+	it("a network failure is wrapped with the engine name", async () => {
+		const provider = searxngProvider("https://s.example", async () => {
+			throw new TypeError("fetch failed");
+		});
+		await assert.rejects(provider.search("q", 5), (err: unknown) => {
+			assert.ok(err instanceof Error);
+			assert.match(err.message, /SearXNG/);
+			assert.match(err.message, /fetch failed/);
+			return true;
+		});
 	});
 });
