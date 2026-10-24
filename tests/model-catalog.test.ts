@@ -1,4 +1,6 @@
-import { describe, it } from "node:test";
+import { TMP_DATA_DIR } from "./fixtures/tmp-data-dir.ts";
+import * as fs from "node:fs";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
 	catalogDefaultsFor,
@@ -33,6 +35,10 @@ import { effectiveSettings } from "../src/server/stores.ts";
 // wave, 2026-09-20): pin openrouter's env key so its full catalog
 // federates in tests regardless of the developer shell's exports.
 process.env.OPENROUTER_API_KEY ??= "test-key-openrouter-catalog";
+
+after(() => {
+	fs.rmSync(TMP_DATA_DIR, { recursive: true, force: true });
+});
 
 /** The catalog's glm entry — the old factory pin's model, still the
  *  best-known thinking-truth specimen (low|high|max). */

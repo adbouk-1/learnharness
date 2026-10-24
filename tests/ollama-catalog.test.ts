@@ -359,6 +359,74 @@ describe("when the refresh runs", () => {
 		assert.equal(bootRefreshEnabled("development"), true);
 		assert.equal(bootRefreshEnabled(undefined), true);
 	});
+
+	it("boot refresh is off during `next build` (route modules import under NODE_ENV=production)", () => {
+		assert.equal(bootRefreshEnabled("production", "phase-production-build"), false);
+		assert.equal(bootRefreshEnabled("development", "phase-production-build"), false);
+		assert.equal(bootRefreshEnabled("production", "phase-production-server"), true);
+		assert.equal(bootRefreshEnabled("production", undefined), true);
+	});
+});
+
+describe("module re-evaluation (Next dev re-evaluates server modules on a file edit)", () => {
+	beforeEach(reset);
+
+	const LISTENERS = Symbol.for("lh.authKeyListeners");
+	const listenerCount = () => (globalThis as Record<symbol, Set<unknown> | undefined>)[LISTENERS]?.size ?? 0;
+	let n = 0;
+	/** A fresh evaluation of src/server/ollama-cloud.ts (new module instance,
+	 *  same globalThis) — what an HMR re-import does. */
+	const reevaluate = () => import(`../src/server/ollama-cloud.ts?reeval=${++n}`);
+
+	it("re-installs the stored catalog when the collection lost the provider", async () => {
+		writeOllamaCatalog({
+			version: 1,
+			baseUrl: BASE,
+			fetchedAt: Date.now(),
+			entries: [{ id: "gemma4:31b", capabilities: ["tools"], contextLength: null, thinkingValues: null }],
+		});
+		piModels().deleteProvider("ollama-cloud");
+		assert.equal(ollamaModels().length, 0, "the rebuilt collection has no Ollama provider");
+		await reevaluate();
+		assert.deepEqual(ollamaModels().map((m) => m.id), ["gemma4:31b"]);
+	});
+
+	it("ensureOllamaCatalog is a no-op while the provider is installed", () => {
+		installOllamaCatalog([{ id: "kept:1", capabilities: ["tools"], contextLength: null, thinkingValues: null }], BASE);
+		writeOllamaCatalog({
+			version: 1,
+			baseUrl: BASE,
+			fetchedAt: 1,
+			entries: [{ id: "file:1", capabilities: ["tools"], contextLength: null, thinkingValues: null }],
+		});
+		ensureOllamaCatalog();
+		assert.deepEqual(ollamaModels().map((m) => m.id), ["kept:1"]);
+	});
+
+	it("keeps exactly one key-change listener across re-evaluations", async () => {
+		await reevaluate();
+		const before = listenerCount();
+		assert.ok(before >= 1);
+		await reevaluate();
+		await reevaluate();
+		assert.equal(listenerCount(), before);
+	});
+
+	it("the live listener belongs to the newest instance and refreshes on an Ollama key change", async () => {
+		const { fetchFn, calls } = stubOllama();
+		const original = globalThis.fetch;
+		globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => fetchFn(String(input), init ?? {})) as typeof fetch;
+		try {
+			await reevaluate();
+			process.env.OLLAMA_API_KEY = KEY;
+			const listeners = (globalThis as Record<symbol, Set<(id: string) => void>>)[LISTENERS]!;
+			for (const l of [...listeners]) l("OLLAMA_API_KEY");
+			await new Promise((r) => setTimeout(r, 50));
+			assert.equal(calls.filter((c) => c.url.endsWith("/api/tags")).length, 1, "one refresh, not one per instance");
+		} finally {
+			globalThis.fetch = original;
+		}
+	});
 });
 
 describe("catalog integration", () => {

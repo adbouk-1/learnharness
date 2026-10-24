@@ -20,7 +20,7 @@
  */
 
 import type { SearchEngineId, SearchHit, SearchProvider, SearchStatus } from "../core/search.ts";
-import { keyValue } from "./keys.ts";
+import { baseUrlValue, keyValue } from "./keys.ts";
 import { effectiveSettings } from "./stores.ts";
 
 /** The wire-callable shape the adapters close over (tests inject a stub). */
@@ -166,7 +166,7 @@ const ENGINE_ORDER: ReadonlyArray<{ id: SearchEngineId; envVar: string }> = [
  *  not keyed, which by owner decision means NOT LIVE. */
 function engineKey(id: SearchEngineId): string | null {
 	const envVar = ENGINE_ORDER.find((e) => e.id === id)?.envVar;
-	const value = envVar ? keyValue(envVar) : undefined;
+	const value = envVar ? (id === "searxng" ? baseUrlValue(envVar) : keyValue(envVar)) : undefined;
 	return value ? value : null;
 }
 

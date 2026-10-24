@@ -241,6 +241,17 @@ export function keyValue(id: string): string | undefined {
 	return process.env[id] ?? authStore.authVars()[id];
 }
 
+/** `keyValue` for a base-URL var (FIRECRAWL_URL, SEARXNG_URL): normalized
+ *  like a saved one (a trailing slash from .env.local must not yield
+ *  `//v2/scrape`), raw when it does not normalize — the consumer's own
+ *  request then fails visibly rather than the URL silently vanishing. */
+export function baseUrlValue(id: string): string | undefined {
+	const raw = keyValue(id);
+	if (raw === undefined) return undefined;
+	const normalized = normalizeBaseUrl(raw);
+	return normalized.ok ? normalized.value : raw;
+}
+
 /** The key-presence truth for one model provider (provider-key interlude,
  * 2026-09-25): would this provider's key be present at request time?
  * Reads through keyValue — the SAME env-first lookup pi-ai performs

@@ -11,7 +11,7 @@
  */
 
 import type { FetchedPage, PageFetcher } from "../core/page-fetch.ts";
-import { keyValue } from "./keys.ts";
+import { baseUrlValue, keyValue } from "./keys.ts";
 
 /** The wire-callable shape the adapter closes over (tests inject a stub). */
 type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
@@ -76,7 +76,7 @@ export function firecrawlFetcher(baseUrl: string, apiKey?: string, fetchFn: Fetc
 /** The LIVE fetcher, or null when FIRECRAWL_URL is unset. Composed fresh
  *  each call — key/URL rotations take effect on the next fetch. */
 export function pageFetcher(): PageFetcher | null {
-	const baseUrl = keyValue("FIRECRAWL_URL");
+	const baseUrl = baseUrlValue("FIRECRAWL_URL");
 	if (!baseUrl) return null;
 	return firecrawlFetcher(baseUrl, keyValue("FIRECRAWL_API_KEY") || undefined);
 }

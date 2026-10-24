@@ -25,6 +25,7 @@ import {
 	type OllamaCatalogEntry,
 } from "../agent/ollama-cloud.ts";
 import { readOllamaCatalog, writeOllamaCatalog } from "../store/ollama-catalog.ts";
+import { piModels } from "../agent/models.ts";
 import { onAuthKeyChange, providerKeyPresent } from "./keys.ts";
 
 /** The wire-callable shape the adapter closes over (tests inject a stub). */
@@ -147,13 +148,17 @@ function state(): CatalogState {
 	return g[STATE_KEY];
 }
 
-/** Install the stored catalog, no network — sync, once per process (module
- *  load runs it). Absent/invalid file, or a copy fetched from a different
+/** Install the stored catalog, no network — sync (module load runs it, on
+ *  every evaluation). Idempotent against the COLLECTION, not a process
+ *  flag: pi-ai's collection is module-scoped (agent/models.ts), so a Next
+ *  dev re-evaluation can leave a fresh collection without the provider
+ *  while this record survives on globalThis — the install must follow the
+ *  collection. Absent/invalid file, or a copy fetched from a different
  *  host than OLLAMA_BASE_URL now names, installs nothing and the first
  *  refresh fills it. `again` re-runs the load (tests). */
 export function ensureOllamaCatalog(opts: { again?: boolean } = {}): void {
 	const s = state();
-	if (s.booted && !opts.again) return;
+	if (!opts.again && piModels().getProviders().some((p) => p.id === OLLAMA_PROVIDER_ID)) return;
 	s.booted = true;
 	s.refreshedAt = null;
 	s.failedAt = null;
@@ -171,9 +176,10 @@ function describeError(err: unknown): string {
 }
 
 /** Whether process start kicks a refresh: not under the test runner, so
- *  test processes stay network-free. */
-export function bootRefreshEnabled(nodeEnv: string | undefined): boolean {
-	return nodeEnv !== "test";
+ *  test processes stay network-free, and not during `next build`, which
+ *  imports route modules (NODE_ENV=production) without serving anything. */
+export function bootRefreshEnabled(nodeEnv: string | undefined, nextPhase?: string): boolean {
+	return nodeEnv !== "test" && nextPhase !== "phase-production-build";
 }
 
 /** Refresh the catalog: fetch, install, persist. Never throws. Does
@@ -230,15 +236,22 @@ export function ollamaCatalogStatus(): OllamaCatalogStatus {
 	return { models: ollamaModels().length, refreshedAt: s.refreshedAt, error: s.error };
 }
 
-// Boot, once per process: install the stored catalog, re-fetch (forced)
-// whenever the Ollama key is saved or removed — a new key is the moment the
-// catalog becomes reachable — and kick one stale-gated refresh now (covers a
-// key that came from the real env, where no save ever runs). All inside the
-// same guard so an HMR re-import does not double any of it.
-if (!state().booted) {
+// Boot. Per module evaluation: install the stored catalog if the collection
+// lacks it, and (re-)subscribe to key changes — re-fetch (forced) whenever
+// the Ollama key is saved or removed, a new key being the moment the catalog
+// becomes reachable. The subscription handle lives on globalThis so a
+// re-evaluated module unsubscribes its predecessor instead of stacking a
+// second listener (which would also close over the old collection). Once per
+// process: kick one stale-gated refresh now (covers a key that came from the
+// real env, where no save ever runs).
+const UNSUBSCRIBE_KEY = Symbol.for("lh.ollamaCatalogUnsubscribe");
+{
+	const first = !state().booted;
 	ensureOllamaCatalog();
-	onAuthKeyChange((id) => {
+	const g = globalThis as Record<symbol, (() => void) | undefined>;
+	g[UNSUBSCRIBE_KEY]?.();
+	g[UNSUBSCRIBE_KEY] = onAuthKeyChange((id) => {
 		if (id === "OLLAMA_API_KEY") void refreshOllamaCatalog({ force: true });
 	});
-	if (bootRefreshEnabled(process.env.NODE_ENV)) void refreshOllamaCatalog();
+	if (first && bootRefreshEnabled(process.env.NODE_ENV, process.env.NEXT_PHASE)) void refreshOllamaCatalog();
 }
